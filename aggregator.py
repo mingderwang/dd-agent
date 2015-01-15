@@ -503,8 +503,8 @@ class Aggregator(object):
         # network socket, but if submit_packets is used
         # programatically and packets is unicode already
         # then do not decode!
-        if not isinstance(packets, unicode):
-            packets = packets.decode('utf-8', 'replace')
+        if not type(packets) == unicode:
+            packets = unicode(packets, 'utf-8')
 
         for packet in packets.splitlines():
 
