@@ -1,6 +1,8 @@
 import logging
 from time import time
+
 from checks.metric_types import MetricTypes
+from config import get_histogram_aggregates, get_histogram_percentiles
 
 log = logging.getLogger(__name__)
 
@@ -213,12 +215,14 @@ class Counter(Metric):
 class Histogram(Metric):
     """ A metric to track the distribution of a set of values. """
 
-    def __init__(self, formatter, name, tags, hostname, device_name):
+    def __init__(self, formatter, name, tags, hostname, device_name,
+            aggregates=None, percentiles=None):
         self.formatter = formatter
         self.name = name
         self.count = 0
         self.samples = []
-        self.percentiles = [0.95]
+        self.aggregates = aggregates or []
+        self.percentiles = percentiles or [0.95]
         self.tags = tags
         self.hostname = hostname
         self.device_name = device_name
@@ -241,13 +245,17 @@ class Histogram(Metric):
         med = self.samples[int(round(length/2 - 1))]
         avg = sum(self.samples) / float(length)
 
-        metric_aggrs = [
-            ('min', min_, MetricTypes.GAUGE),
-            ('max', max_, MetricTypes.GAUGE),
-            ('median', med, MetricTypes.GAUGE),
-            ('avg', avg, MetricTypes.GAUGE),
-            ('count', self.count/interval, MetricTypes.RATE)
-        ]
+        metric_aggrs = []
+        if 'min' in self.aggregates:
+            metric_aggrs.append(('min', min_, MetricTypes.GAUGE))
+        if 'max' in self.aggregates:
+            metric_aggrs.append(('max', max_, MetricTypes.GAUGE))
+        if 'median' in self.aggregates:
+            metric_aggrs.append(('median', med, MetricTypes.GAUGE))
+        if 'avg' in self.aggregates:
+            metric_aggrs.append(('avg', avg, MetricTypes.GAUGE))
+        if 'count' in self.aggregates:
+            metric_aggrs.append(('count', self.count/interval, MetricTypes.RATE))
 
         metrics = [self.formatter(
                 hostname=self.hostname,
@@ -593,7 +601,9 @@ class MetricsBucketAggregator(Aggregator):
     A metric aggregator class.
     """
 
-    def __init__(self, hostname, interval=1.0, expiry_seconds=300, formatter=None, recent_point_threshold=None):
+    def __init__(self, hostname, interval=1.0, expiry_seconds=300,
+            formatter=None, recent_point_threshold=None,
+            histogram_aggregates=None, histogram_percentiles=None):
         super(MetricsBucketAggregator, self).__init__(hostname, interval, expiry_seconds, formatter, recent_point_threshold)
         self.metric_by_bucket = {}
         self.last_sample_time_by_context = {}
@@ -607,6 +617,10 @@ class MetricsBucketAggregator(Aggregator):
             'ms': Histogram,
             's': Set,
         }
+        self.histogram_aggregates = histogram_aggregates\
+           or get_histogram_aggregates()
+        self.histogram_percentiles = histogram_percentiles\
+            or get_histogram_percentiles()
 
     def calculate_bucket_start(self, timestamp):
         return timestamp - (timestamp % self.interval)
@@ -646,8 +660,13 @@ class MetricsBucketAggregator(Aggregator):
 
             if context not in metric_by_context:
                 metric_class = self.metric_type_to_class[mtype]
-                metric_by_context[context] = metric_class(self.formatter, name, tags,
-                    hostname, device_name)
+                if metric_class == Histogram:
+                    metric_by_context[context] = metric_class(self.formatter, name, tags,
+                        hostname, device_name, self.histogram_aggregates,
+                        self.histogram_percentiles)
+                else:
+                    metric_by_context[context] = metric_class(self.formatter, name, tags,
+                        hostname, device_name)
 
             metric_by_context[context].sample(value, sample_rate, timestamp)
 
@@ -721,7 +740,7 @@ class MetricsAggregator(Aggregator):
     A metric aggregator class.
     """
 
-    def __init__(self, hostname, interval=1.0, expiry_seconds=300, formatter=None, recent_point_threshold=None):
+    def __init__(self, hostname, interval=1.0, expiry_seconds=300, formatter=None, recent_point_threshold=None, histogram_aggregates=None, histogram_percentiles=None):
         super(MetricsAggregator, self).__init__(hostname, interval, expiry_seconds, formatter, recent_point_threshold)
         self.metrics = {}
         self.metric_type_to_class = {
@@ -734,6 +753,10 @@ class MetricsAggregator(Aggregator):
             's': Set,
             '_dd-r': Rate,
         }
+        self.histogram_aggregates = histogram_aggregates\
+           or get_histogram_aggregates()
+        self.histogram_percentiles = histogram_percentiles\
+            or get_histogram_percentiles()
 
     def submit_metric(self, name, value, mtype, tags=None, hostname=None,
                                 device_name=None, timestamp=None, sample_rate=1):
@@ -748,8 +771,13 @@ class MetricsAggregator(Aggregator):
             context = (name, tuple(sorted(set(tags))), hostname, device_name)
         if context not in self.metrics:
             metric_class = self.metric_type_to_class[mtype]
-            self.metrics[context] = metric_class(self.formatter, name, tags,
-                hostname, device_name)
+            if metric_class == Histogram:
+                self.metrics[context] = metric_class(self.formatter, name, tags,
+                    hostname, device_name, self.histogram_aggregates,
+                    self.histogram_percentiles)
+            else:
+                self.metrics[context] = metric_class(self.formatter, name, tags,
+                    hostname, device_name)
         cur_time = time()
         if timestamp is not None and cur_time - int(timestamp) > self.recent_point_threshold:
             log.debug("Discarding %s - ts = %s , current ts = %s " % (name, timestamp, cur_time))
@@ -812,18 +840,18 @@ def get_formatter(config):
   formatter = api_formatter
 
   if config['statsd_metric_namespace']:
-    def metric_namespace_formatter_wrapper(metric, value, timestamp, tags, 
+    def metric_namespace_formatter_wrapper(metric, value, timestamp, tags,
         hostname=None, device_name=None, metric_type=None, interval=None):
       metric_prefix = config['statsd_metric_namespace']
       if metric_prefix[-1] != '.':
         metric_prefix += '.'
 
-      return api_formatter(metric_prefix + metric, value, timestamp, tags, hostname, 
+      return api_formatter(metric_prefix + metric, value, timestamp, tags, hostname,
         device_name, metric_type, interval)
 
     formatter = metric_namespace_formatter_wrapper
   return formatter
-  
+
 
 def api_formatter(metric, value, timestamp, tags, hostname=None, device_name=None,
         metric_type=None, interval=None):
